@@ -163,7 +163,7 @@ void do_fork(my_proc* p) {
         }
         //cout << p->cname << endl;
         close_pipes(used_pipe);  //also close the pipe in different pipeline
-	
+
         if (execvp(p->cname, p->arg_list) == -1) {
             cerr << "Unknown command: [" << p->cname << "]." << endl;
             kill_prev(p);
@@ -212,7 +212,7 @@ void exec_cmd() {
         //cout << i << " ";
         if (p->completed == true || p->pid != -1)
             continue;
-        
+
         do_fork(p);
 	if (p->line_count > 0)
 	    s_flag = true;
@@ -238,7 +238,7 @@ void exec_cmd() {
             else {
                 while (nxt) {     //if it has next
                     //my_proc* p1 = p;
-                    if (nxt->line_count > 0 ) { //it means next's next is not ready		
+                    if (nxt->line_count > 0 ) { //it means next's next is not ready
 			break;
                     }
 
@@ -266,7 +266,7 @@ void exec_cmd() {
                     nxt = nxt->next;
                 }
             }
-	}
+        }
     }
     if (s_flag)
 	    usleep(20000);
@@ -378,13 +378,19 @@ void Input() {
         if (!cin.getline(lined_cmd, 20000)) {
            break;
         }
+        if (strlen(lined_cmd) && lined_cmd[strlen(lined_cmd)-1] == '\r') {
+            lined_cmd[strlen(lined_cmd)-1] = '\0';
+        }
+
         cur_cmd = strtok(lined_cmd, " ");
         if (cur_cmd == NULL)
             continue;
         //cout << cur_cmd << endl;
+        //cout << strcmp(cur_cmd, "exit") << endl;
         do {
             //built-in command
             if (strcmp(cur_cmd, "exit") == 0) {
+
                 return;
             }
 
@@ -430,16 +436,62 @@ void Input() {
         read_cmd();
 
     }
-    free(cur_cmd);
     for (int i = 0; i < proc.size(); i++) {
         delete(proc[i]);
     }
     return;
 }
 
-int main(int argc, char** argv, char** envp) {
 
-    Input();
+int main(int argc, char** argv, char** envp) {
+    int msock, ssock, childpid;
+    struct sockaddr_in cli_addr, serv_addr;
+    msock = socket(AF_INET, SOCK_STREAM, 6);
+    if (msock < 0) {
+        cerr << "Server: can't open stream socket" << endl;
+        return 1;
+    }
+    bzero((char*) &serv_addr, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serv_addr.sin_port = htons(7000);
+    if (bind(msock, (struct sockaddr*) &serv_addr, sizeof(serv_addr)) < 0) {
+        cerr << "Server: can't bind local address" << endl;
+        return 1;
+    }
+    listen(msock, 1);
+    cout << "Server: start listen" << endl;
+    while (true) {
+        socklen_t clilen = sizeof(cli_addr);
+        ssock = accept(msock, (struct sockaddr*) &cli_addr, &clilen);
+        cout << "Server: accept a client" << endl;
+        if (ssock < 0) {
+            cerr << "Server: accept error" << endl;
+            continue;
+        }
+        childpid = fork();
+        if (childpid < 0) {
+            cerr << "Server: fork error" << endl;
+        }
+        else if (childpid == 0) {
+            // child process
+            close(0);
+            dup(ssock);
+            close(1);
+            dup(ssock);
+            close(2);
+            dup(ssock);
+
+            close(msock);
+            Input();
+            exit(0);
+        }
+        else {
+            // parent process
+            close(ssock);
+        }
+    }
+
 
     return 0;
 }
