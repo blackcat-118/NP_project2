@@ -1,5 +1,6 @@
 using namespace std;
 #include <iostream>
+#include <cerrno>
 #include <cstring>
 #include <deque>
 #include <vector>
@@ -8,9 +9,9 @@ using namespace std;
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
-#include <sys/socket.h>
 
 #ifndef DEBUG
 #define DEBUG_BLOCK(statement)
@@ -446,9 +447,18 @@ void Input() {
 int main(int argc, char** argv, char** envp) {
     int msock, ssock, childpid;
     struct sockaddr_in cli_addr, serv_addr;
+    int reuse_flag = 1;
+
     msock = socket(AF_INET, SOCK_STREAM, 6);
+    // set reuse socket option
+    if (setsockopt(msock, SOL_SOCKET, SO_REUSEADDR, &reuse_flag, sizeof(int)) < 0) {
+        cerr << "set socket option error: " << strerror(errno) << endl;
+        return 1;
+    }
+
+
     if (msock < 0) {
-        cerr << "Server: can't open stream socket" << endl;
+        cerr << "cannot open stream socket: " << strerror(errno) << endl;
         return 1;
     }
     bzero((char*) &serv_addr, sizeof(serv_addr));
@@ -456,7 +466,7 @@ int main(int argc, char** argv, char** envp) {
     serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     serv_addr.sin_port = htons(7000);
     if (bind(msock, (struct sockaddr*) &serv_addr, sizeof(serv_addr)) < 0) {
-        cerr << "Server: can't bind local address" << endl;
+        cerr << "Server can't bind local address: " << strerror(errno) << endl;
         return 1;
     }
     listen(msock, 1);
@@ -466,15 +476,16 @@ int main(int argc, char** argv, char** envp) {
         ssock = accept(msock, (struct sockaddr*) &cli_addr, &clilen);
         cout << "Server: accept a client" << endl;
         if (ssock < 0) {
-            cerr << "Server: accept error" << endl;
+            cerr << "Server accept error: " << strerror(errno) << endl;
             continue;
         }
         childpid = fork();
         if (childpid < 0) {
-            cerr << "Server: fork error" << endl;
+            cerr << "Server fork error: " << strerror(errno) << endl;
         }
         else if (childpid == 0) {
             // child process
+            // pipe input and output to client
             close(0);
             dup(ssock);
             close(1);
