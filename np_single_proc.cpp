@@ -28,30 +28,7 @@ fd_set rfds;  // read file descriptor set
 fd_set afds;  // active file descriptor set
 int in_fd, out_fd, err_fd;
 bool user_list[32];
-class user{
-public:
-    user(unsigned int id, char* addr, int port, int sockfd): username("(no name)"), id(id), env_var({{"PATH", "bin:."}}), addr(addr), port(port), sockfd(sockfd), proc_indx(0), pipe_counter(0)){}
-    virtual ~user() {
-        for (int i = 0; i < proc.size(); i++) {
-            delete(proc[i]);
-        }
-        for (map<char*, char*>::iterator it = env_var.begin(); it != env_var.end(); it++) {
-            free(it->first);
-            free(it->second);
-        }
-    }
-    unsigned int id;
-    char username[100];
-    map<char*, char*> env_var;
-    char addr[20];
-    int port;
-    int sockfd;
-    deque<my_proc*> proc;
-    int proc_indx;
-    int pipe_counter;
-};
-map<unsigned int,user*> users;
-deque<char*> cmd;
+
 class my_proc {
 public:
     my_proc(char* cname): cname(cname), next(nullptr), arg_count(1), arg_list{cname, NULL},
@@ -72,7 +49,71 @@ public:
     bool p_flag; //normal pipe FLAG
 
 };
+class user{
+public:
+    user(unsigned int id, string addr_ch, int port, int sockfd): username("(no name)"), id(id), env_var({{"PATH", "bin:."}}), port(port), sockfd(sockfd){}
+    virtual ~user() {
+        for (int i = 0; i < proc.size(); i++) {
+            delete(proc[i]);
+        }
+        /*for (map<string, string>::iterator it = env_var.begin(); it != env_var.end(); it++) {
+            free(it->first);
+            free(it->second);
+        }*/
+    }
+    unsigned int id;
+    string username;
+    map<string, string> env_var;
+    string addr;
+    unsigned short port;
+    int sockfd;
+    deque<my_proc*> proc;
+    int proc_indx = 0;
+    int pipe_counter = 0;
+};
+map<unsigned int,user*> users;
+deque<char*> cmd;
+
 //deque<my_proc*> proc;
+
+void unicast_msg(string mode, int userid) {
+
+    char* msg;
+    string strmsg;
+    if (mode == "welcome") {
+        strmsg = "****************************************\n** Welcome to the information server. **\n****************************************\n";
+        msg = strmsg.data();
+    }
+    if (mode == "start") {
+        strmsg = "% ";
+        msg = strmsg.data();
+    }
+    write(users[userid]->sockfd, msg, strlen(msg));
+
+    return;
+}
+
+void broadcast_msg(string mode, int userid) {
+    char* msg;
+    string strmsg;
+    if (mode == "login") {
+        strmsg = "*** User \'" + users[userid]->username + "\' entered from " + users[userid]->addr + ":" + to_string(users[userid]->port) + ". ***\n";
+        msg = strmsg.data();
+
+    }
+    else if (mode == "logout") {
+        strmsg = "*** User \'" + users[userid]->username + "\' left. ***\n";
+        msg = strmsg.data();
+    }
+
+    for (int i = 1; i < 32; i++) {
+        if (user_list[i] == true) {
+            write(users[i]->sockfd, msg, strlen(msg));
+        }
+
+    }
+    return;
+}
 
 void create_pipe(int* pipefd) {
 
@@ -128,7 +169,7 @@ void kill_prev(my_proc* p) {
 vector<int> used_pipe;
 
 void do_fork(int userid, my_proc* p) {
-    deque<my_proc*>::reference proc = &users[userid].proc;
+    deque<my_proc*>& proc = users[userid]->proc;
 
     int pipefd[2];
     if (p->pid != -1) {
@@ -138,7 +179,7 @@ void do_fork(int userid, my_proc* p) {
     bool flag = false;
     if (p->line_count > 0) {
 
-        for (int i = 0; i < users[userid].proc_indx; i++) {
+        for (int i = 0; i < users[userid]->proc_indx; i++) {
             my_proc* p1 = proc[i];
 
             if (p1->line_count == p->line_count) {
@@ -214,19 +255,19 @@ void do_fork(int userid, my_proc* p) {
 }
 
 void line_counter(int userid) {
-    deque<my_proc*>::reference proc = &users[userid].proc;
+    deque<my_proc*>& proc = users[userid]->proc;
     for (int i = 0; i < proc.size(); i++) {
         proc[i]->line_count--;
         if (proc[i]->p_flag == false && proc[i]->line_count >= 0) {
-            proc[i]->line_count += users[userid].pipe_counter;
+            proc[i]->line_count += users[userid]->pipe_counter;
         }
     }
-    users[userid].pipe_counter = 0;
+    users[userid]->pipe_counter = 0;
     return;
 }
 
 void check_proc_pipe(int userid, my_proc* cur) {
-    deque<my_proc*>::reference proc = &users[userid].proc;
+    deque<my_proc*>& proc = users[userid]->proc;
     // check whether has a process is the current one's prev
     for (int i = 0; i < proc.size()-1; i++) {
 
@@ -241,15 +282,15 @@ void check_proc_pipe(int userid, my_proc* cur) {
 void exec_cmd(int userid) {
     int wstatus;
     bool s_flag = false;
-    deque<my_proc*>::reference proc = &users[userid].proc;
+    deque<my_proc*>& proc = users[userid]->proc;
 
-    for (users[userid].proc_indx; users[userid].proc_indx < proc.size(); users[userid].proc_indx++) {
-        my_proc* p = proc[users[userid].proc_indx];
+    for (users[userid]->proc_indx; users[userid]->proc_indx < proc.size(); users[userid]->proc_indx++) {
+        my_proc* p = proc[users[userid]->proc_indx];
         //cout << i << " ";
         if (p->completed == true || p->pid != -1)
             continue;
 
-        do_fork(p);
+        do_fork(userid, p);
 	if (p->line_count > 0)
 	    s_flag = true;
 
@@ -313,7 +354,7 @@ void read_cmd(int userid) {
     char* cur_cmd;
     char* next_cmd;
     bool flag = false;
-    deque<my_proc*>::reference proc = &users[userid].proc;
+    deque<my_proc*>& proc = users[userid]->proc;
 
     while (cmd.size()) {
         flag = true;
@@ -362,14 +403,14 @@ void read_cmd(int userid) {
             if (strcmp(next_cmd, "|") == 0) { //pipe to next
                 cur->line_count = 1;
                 cur->p_flag = true;
-                users[userid].pipe_counter++;
+                users[userid]->pipe_counter++;
                 cmd.pop_front();
             }
             else if (strcmp(next_cmd, "!") == 0) {
                 cur->err = true;
                 cur->line_count = 1;
                 cur->p_flag = true;
-                users[userid].pipe_counter++;
+                users[userid]->pipe_counter++;
                 cmd.pop_front();
             }
             else if (next_cmd[0] == '|') {  //number pipe
@@ -403,23 +444,15 @@ void read_cmd(int userid) {
 
 void Input(int userid) {
     char* cur_cmd;
-    int fd = users[userid].sockfd;
+
     //initial PATH environment varible
-    for (map<char*, char*>::iterator it = users[userid].env_var.begin(); it != users[userid].env_var.end(); it++) {
-        setenv(it->first, it->second, 1);
+    for (map<string, string>::iterator it = users[userid]->env_var.begin(); it != users[userid]->env_var.end(); it++) {
+        setenv(it->first.data(), it->second.data(), 1);
     }
-    // handle input/output/error message streams
-    close(0);
-    dup(fd);
-    close(1);
-    dup(fd);
-    close(2);
-    dup(fd);
 
     while (1) {
         char lined_cmd[20000];
 
-        cout << "% ";
         // get one line command
         if (!cin.getline(lined_cmd, 20000)) {
            break;
@@ -431,8 +464,9 @@ void Input(int userid) {
         cur_cmd = strtok(lined_cmd, " ");
         if (cur_cmd == NULL)
             continue;
-
+        //cout << strcmp(cur_cmd, "exit") << endl;
         do {
+
             //built-in command
             if (strcmp(cur_cmd, "exit") == 0) {
                 user* usr = users[userid];
@@ -472,15 +506,11 @@ void Input(int userid) {
                     break;
                 }
                 //cout << "setenv " << arg1 << " " << arg2 << endl;
-                if (users[userid].env_var.find(arg1) != users[userid].env_var.end()) {
-                    strcpy(users[userid].env_var.find(arg1)->second, arg2);
+                if (users[userid]->env_var.find(arg1) != users[userid]->env_var.end()) {
+                    users[userid]->env_var.find(arg1)->second = arg2;
                 }
                 else {
-                    char* e1 = (char*)malloc(sizeof(arg1));
-                    char* e2 = (char*)malloc(sizeof(arg2));
-                    strcpy(e1, arg1);
-                    strcpy(e2, arg2);
-                    users[userid].env_var.insert(pair<char*, char*>(e1, e2));
+                    users[userid]->env_var.insert(pair<string, string>(arg1, arg2));
                 }
                 setenv(arg1, arg2, 1);
                 line_counter(userid);
@@ -496,50 +526,10 @@ void Input(int userid) {
         }while (cur_cmd != NULL);
 
         read_cmd(userid);
+        cout << "% " << flush;
         break;
-
     }
-    // restore stdin/stdout/stderr
-    close(0);
-    dup(in_fd);
-    close(1);
-    dup(out_fd);
-    close(2);
-    dup(err_fd);
 
-    return;
-}
-
-void unicast_msg(char* mode, int userid) {
-
-    char* msg;
-    if (mode == "welcome") {
-        string strmsg = "****************************************\n** Welcome to the information server. **\n****************************************\n";
-        msg = strmsg.data();
-    }
-    write(users[userid]->sockfd, msg, strlen(msg));
-
-    return;
-}
-
-void broadcast_msg(char* mode, int userid) {
-    char* msg;
-    string strmsg;
-    if (mode == "login") {
-        string strmsg = "*** User \'" + users[userid]->username + "\' entered from " + users[userid]->addr + ":" + to_string(users[userid]->port) + ". ***";
-        msg = strmsg.data();
-
-    }
-    else if (mode == "logout") {
-        string strmsg = "*** User \'" + users[userid]->username + "\' left. ***";
-        msg = strmsg.data();
-    }
-    for (int i = 1; i < 32; i++) {
-        if (user_list[i] == true) {
-            write(users[i]->sockfd, msg, strlen(msg));
-        }
-
-    }
     return;
 }
 
@@ -579,14 +569,14 @@ int main(int argc, char** argv, char** envp) {
     listen(msock, 32);
     cout << "Server: start listen" << endl;
 
-    nfds = getdtablesize()
+    nfds = getdtablesize();
     FD_ZERO(&afds);
-    FD_SET(msock, &afds)
+    FD_SET(msock, &afds);
 
     while (true) {
         memcpy(&rfds, &afds, sizeof(rfds));
 
-        if (select(nfds, &rfds, (fd_set*)0, (fd_set*)0, (struct timval*)0) < 0) {
+        if (select(nfds, &rfds, (fd_set*)0, (fd_set*)0, (struct timeval*)0) < 0) {
             cerr << "Server select error: " << strerror(errno) << endl;
             continue;
         }
@@ -600,6 +590,7 @@ int main(int argc, char** argv, char** envp) {
                 cerr << "Server accept error: " << strerror(errno) << endl;
                 continue;
             }
+            FD_SET(ssock, &afds);
             // create a new user
             int new_usrid = -1;
             for (int i = 1; i < 32; i++) {
@@ -610,16 +601,40 @@ int main(int argc, char** argv, char** envp) {
             }
             if (new_usrid > 0) {
                 user_list[new_usrid] = true;
-                user* new_usr = user(new_usrid, cli_addr.sin_addr.s_addr, cli_addr.sin_port, ssock);
+                cout << "Server: add user " << new_usrid << endl;
+                user* new_usr = new user(new_usrid, inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port), ssock);
                 users.insert(pair<unsigned int, user*>(new_usrid, new_usr));
                 unicast_msg("welcome", new_usrid);  // unicast welcome message
                 broadcast_msg("login", new_usrid);  // broadcast login message
+                unicast_msg("start", new_usrid);
             }
         }
-        for (int i = 0; i < users.size(); i++) {
+        for (int i = 1; i < 32; i++) {
+            if (user_list[i] == false)
+                continue;
             int fd = users[i]->sockfd;
+
             if (FD_ISSET(fd, &rfds)) {
+                cout << "Server: switch to user " << users[i]->id << endl;
+
+                // handle input/output/error message streams
+                close(0);
+                dup(fd);
+                close(1);
+                dup(fd);
+                close(2);
+                dup(fd);
+
                 Input(users[i]->id);
+
+                // restore stdin/stdout/stderr
+                close(0);
+                dup(in_fd);
+                close(1);
+                dup(out_fd);
+                close(2);
+                dup(err_fd);
+
             }
         }
 
