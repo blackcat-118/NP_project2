@@ -33,6 +33,9 @@ class my_proc {
 public:
     my_proc(char* cname): cname(cname), next(nullptr), arg_count(1), arg_list{cname, NULL},
     line_count(-1), readfd(0), writefd(1), completed(false), pid(-1), output_file{}, err(false), p_flag(false){}
+    my_proc(char* cname, int readfd, int writefd): cname(cname), next(nullptr), arg_count(1), arg_list{cname, NULL},
+    line_count(-1), readfd(readfd), writefd(writefd), completed(false), pid(-1), output_file{}, err(false), p_flag(false){}
+
     virtual ~my_proc(){}
     my_proc* next;
     deque<my_proc*> prev;
@@ -73,6 +76,7 @@ public:
 };
 map<unsigned int,user*> users;
 deque<char*> cmd;
+char cmd_copy[20000];
 
 //deque<my_proc*> proc;
 
@@ -104,6 +108,10 @@ void broadcast_msg(string mode, int userid) {
     else if (mode == "logout") {
         strmsg = "*** User \'" + users[userid]->username + "\' left. ***\n";
         msg = strmsg.data();
+    }
+    else if (mode == "receive") {
+        string command = cmd_copy;
+        strmsg = "*** " + users[userid]->username + " (#" + userid + ") just received from " +
     }
 
     for (int i = 1; i < 32; i++) {
@@ -353,11 +361,9 @@ void exec_cmd(int userid) {
 void read_cmd(int userid) {
     char* cur_cmd;
     char* next_cmd;
-    bool flag = false;
     deque<my_proc*>& proc = users[userid]->proc;
 
     while (cmd.size()) {
-        flag = true;
         cur_cmd = cmd.front();
         cmd.pop_front();
 
@@ -369,9 +375,9 @@ void read_cmd(int userid) {
         proc.push_back(cur);
 
 
-        if (cmd.size() != 0) {    //this block is used for reading pipes or arguments
+        if (cmd.size() != 0) {  //this block is used for reading pipes or arguments
             next_cmd = cmd.front();
-            while (next_cmd[0] != '|' && next_cmd[0] != '!') {  //check whether next is the current command's argument or file redirection
+             while (next_cmd[0] != '|' && next_cmd[0] != '!') {  //check whether next is the current command's argument or file redirection
                 if (strcmp(next_cmd, ">") == 0) {  //file redirection
                     cmd.pop_front();
                     if (cmd.size() == 0) {
@@ -380,6 +386,24 @@ void read_cmd(int userid) {
                     }
                     next_cmd = cmd.front();
                     strcpy(cur->output_file, next_cmd);
+                    cmd.pop_front();
+                }
+                else if (next_cmd[0] == '<') {  //user read pipe
+                    next_cmd[0] = ' ';
+                    int uid = atoi(next_cmd);
+                    if (users.find(uid) == users.end()) {
+                        cout <<  "*** Error: user #" << uid << " does not exist yet. ***" << endl;
+                    }
+                    cur->readfd = users[uid]->sockfd;
+                    cmd.pop_front();
+                }
+                else if (next_cmd[0] == '>') {  //user write pipe
+                    next_cmd[0] = ' ';
+                    int uid = atoi(next_cmd);
+                    if (users.find(uid) == users.end()) {
+                        cout <<  "*** Error: user #" << uid << " does not exist yet. ***" << endl;
+                    }
+                    cur->writefd = users[uid]->sockfd;
                     cmd.pop_front();
                 }
                 else {   // command arguments
@@ -420,7 +444,6 @@ void read_cmd(int userid) {
                 DEBUG_BLOCK (
                              cout << "number pipe of this command: " << cur->line_count << endl;
                 );
-                flag = true;
                 cmd.pop_front();
             }
             else if (next_cmd[0] == '!') {  //number pipe
@@ -431,7 +454,6 @@ void read_cmd(int userid) {
                 DEBUG_BLOCK (
                              cout << "number pipe of this command: " << cur->line_count << endl;
                 );
-                flag = true;
                 cmd.pop_front();
             }
         }
@@ -460,6 +482,7 @@ void Input(int userid) {
         if (strlen(lined_cmd) && lined_cmd[strlen(lined_cmd)-1] == '\r') {
             lined_cmd[strlen(lined_cmd)-1] = '\0';
         }
+        strcpy(cmd_copy, lined_cmd);
 
         cur_cmd = strtok(lined_cmd, " ");
         if (cur_cmd == NULL)
