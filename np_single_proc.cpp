@@ -53,7 +53,7 @@ public:
 };
 class user{
 public:
-    user(unsigned int id, string addr_ch, int port, int sockfd): username("(no name)"), id(id), env_var({{"PATH", "bin:."}}), port(port), sockfd(sockfd){}
+    user(unsigned int id, string addr, int port, int sockfd): username("(no name)"), id(id), env_var({{"PATH", "bin:."}}), addr(addr), port(port), sockfd(sockfd){}
     virtual ~user() {
         for (int i = 0; i < proc.size(); i++) {
             delete(proc[i]);
@@ -80,9 +80,16 @@ char cmd_copy[20000];
 
 //deque<my_proc*> proc;
 
-void unicast_msg(string mode, int userid) {
+void sig_waitchild(int signo) {
+    if (signo == SIGCHLD) {
+        int status;
+        while(waitpid(-1,&status,WNOHANG) > 0){}
+    }
+    return;
+}
 
-    char* msg;
+void unicast_msg(string mode, int userid, char* msg) {
+
     string strmsg;
     if (mode == "welcome") {
         strmsg = "****************************************\n** Welcome to the information server. **\n****************************************\n";
@@ -98,7 +105,7 @@ void unicast_msg(string mode, int userid) {
 }
 
 void broadcast_msg(string mode, int userid, char* msg) {
-    
+
     string strmsg;
     if (mode == "login") {
         strmsg = "*** User \'" + users[userid]->username + "\' entered from " + users[userid]->addr + ":" + to_string(users[userid]->port) + ". ***\n";
@@ -107,6 +114,10 @@ void broadcast_msg(string mode, int userid, char* msg) {
     }
     else if (mode == "logout") {
         strmsg = "*** User \'" + users[userid]->username + "\' left. ***\n";
+        msg = strmsg.data();
+    }
+    else if (mode == "yell") {
+        strmsg = "*** " + users[userid]->username + " yelled ***: " + msg + "\n";
         msg = strmsg.data();
     }
 
@@ -214,7 +225,7 @@ void do_fork(int userid, my_proc* p) {
         readfd = p->rfd;  //rfd is real readfd, origin readfd is used for storing pipe reading port
     }
     writefd = p->writefd;
-    cout << p->cname << readfd << writefd << endl;
+    //cout << p->cname << readfd << writefd << endl;
     if (flag) { // merge pipe
         usleep(1000);
     }
@@ -256,7 +267,21 @@ void do_fork(int userid, my_proc* p) {
         exit(0);
     }
     else {
-        close(readfd);
+        //parent process
+        if (readfd != 0) {
+            close(readfd);
+            for (int a = 0; a < used_pipe.size(); a++) {
+                if (used_pipe[a] == readfd)
+                    used_pipe.erase(used_pipe.begin()+a);
+            }
+        }
+        if (writefd != 1) {
+            close(writefd);
+            for (int a = 0; a < used_pipe.size(); a++) {
+                if (used_pipe[a] == writefd)
+                    used_pipe.erase(used_pipe.begin()+a);
+            }
+        }
     }
     return;
 }
@@ -294,7 +319,7 @@ void exec_cmd(int userid) {
     for (users[userid]->proc_indx; users[userid]->proc_indx < proc.size(); users[userid]->proc_indx++) {
         my_proc* p = proc[users[userid]->proc_indx];
         //cout << i << " ";
-        if (p->completed == true || p->pid != -1)
+        if (p->pid != -1)
             continue;
 
         do_fork(userid, p);
@@ -312,12 +337,9 @@ void exec_cmd(int userid) {
 
             my_proc* nxt = p->next;
             if (nxt == nullptr) { //if it doesn't have next
-                if (waitpid(p->pid, &wstatus, 0) == -1) {
-                    cerr << "failed to wait for child" << endl;
-                }
-                else {
-                    p->completed = true;
-                }
+                waitpid(p->pid, &wstatus, 0);
+                p->completed = true;
+
             }
             else {
                 while (nxt) {     //if it has next
@@ -327,7 +349,7 @@ void exec_cmd(int userid) {
                     }
 
                     if (nxt->next == nullptr || p->line_count < -100) { //reach pipeline end
-                        if (p->rfd != 0) {
+                        /*if (p->rfd != 0) {
                             close(p->rfd);
                             for (int a = 0; a < used_pipe.size(); a++) {
                                 if (used_pipe[a] == p->rfd)
@@ -341,18 +363,14 @@ void exec_cmd(int userid) {
                                     used_pipe.erase(used_pipe.begin()+a);
                             }
                         }
-                        /*for (int a = 0; a < used_pipe.size(); a++) {
+                        for (int a = 0; a < used_pipe.size(); a++) {
                             if (used_pipe[a] == p->readfd || used_pipe[a] == p->writefd) {
                                 used_pipe.erase(used_pipe.begin()+a);
                                 a--;
                             }
                         }*/
-                        if (waitpid(p->pid, &wstatus, 0) == -1) {
-                            cerr << "failed to wait for child" << endl;
-                        }
-                        else {
-                            p->completed = true;
-                        }
+                        //waitpid(p->pid, &wstatus, 0); // here still should wait
+                        p->completed = true;
                         break;
                     }
                     nxt = nxt->next;
@@ -417,7 +435,7 @@ void read_cmd(int userid) {
                         cmd.pop_front();
                     }
                     //cur->readfd = users[uid]->sockfd;
-                    
+
                 }
                 else if (next_cmd[0] == '>') {  //user write pipe
                     next_cmd[0] = ' ';
@@ -453,7 +471,7 @@ void read_cmd(int userid) {
                         broadcast_msg("n", userid, strmsg.data());
                         cmd.pop_front();
                     }
-                    
+
                 }
                 else {   // command arguments
                     if (cur->arg_count >= MAX_ARGUMENTS-1) {   // last one is NULL
@@ -588,6 +606,46 @@ void Input(int userid) {
                 line_counter(userid);
 
             }
+            else if (strcmp(cur_cmd, "who") == 0) {
+                cout << "<ID>\t<nickname>\t<IP:port>\t<indicate me>" << endl;
+                for (map<unsigned int, user*>::iterator it = users.begin(); it != users.end(); it++) {
+                    cout << it->second->id << "\t" << it->second->username << "\t" << it->second->addr << ":" << it->second->port << "\t";
+                    if (it->second->id == userid) {
+                        cout << "<-me";
+                    }
+                    cout << endl;
+                }
+            }
+            else if (strcmp(cur_cmd, "name") == 0) {
+                string newname = strtok(NULL, " ");
+                bool ch_flag = true;  // change name flag
+                for (map<unsigned int, user*>::iterator it = users.begin(); it != users.end(); it++) {
+                    if (it->second->username == newname) {
+                        cout << "*** User \'" << newname << "\' already exists. ***" << endl;
+                        ch_flag = false;
+                        break;
+                    }
+                }
+                if (ch_flag == true) {
+                    users[userid]->username = newname;
+                    cout << "*** User from " << users[userid]->addr << ":" << users[userid]->port << " is named \'" << newname << "\'. ***" << endl;
+                }
+            }
+            else if (strcmp(cur_cmd, "yell") == 0) {
+                char* msg = strtok(NULL, "");
+                broadcast_msg("yell", userid, msg);
+            }
+            else if (strcmp(cur_cmd, "tell") == 0) {
+                int u1_id = atoi(strtok(NULL, " "));
+                if (users.find(u1_id) == users.end()) {
+                    cout <<  "*** Error: user #" << u1_id << " does not exist yet. ***" << endl;
+                }
+                else {
+                    string msg = "*** " + users[userid]->username + " told you ***: " + strtok(NULL, "") + "\n";
+                    unicast_msg("tell", u1_id, msg.data());
+                }
+
+            }
             else {
                 char* s = (char*)malloc(sizeof(cur_cmd));
                 strcpy(s, cur_cmd);
@@ -610,6 +668,7 @@ int main(int argc, char** argv, char** envp) {
     int reuse_flag = 1;
     struct sockaddr_in serv_addr;
 
+    signal(SIGCHLD, sig_waitchild);
     // initialization
     for (int i = 0; i < 32; i++) {
         // user status
@@ -673,12 +732,13 @@ int main(int argc, char** argv, char** envp) {
             }
             if (new_usrid > 0) {
                 user_list[new_usrid] = true;
-                cout << "Server: add user " << new_usrid << endl;
+                cout << "Server: add user " << new_usrid << " from " << inet_ntoa(cli_addr.sin_addr) << endl;
+
                 user* new_usr = new user(new_usrid, inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port), ssock);
                 users.insert(pair<unsigned int, user*>(new_usrid, new_usr));
-                unicast_msg("welcome", new_usrid);  // unicast welcome message
+                unicast_msg("welcome", new_usrid, nullptr);  // unicast welcome message
                 broadcast_msg("login", new_usrid, nullptr);  // broadcast login message
-                unicast_msg("start", new_usrid);
+                unicast_msg("start", new_usrid, nullptr);
             }
         }
         for (int i = 1; i < 32; i++) {
