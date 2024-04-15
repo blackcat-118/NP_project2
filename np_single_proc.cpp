@@ -32,9 +32,7 @@ bool user_list[32];
 class my_proc {
 public:
     my_proc(char* cname): cname(cname), next(nullptr), arg_count(1), arg_list{cname, NULL},
-    line_count(-1), readfd(0), writefd(1), completed(false), pid(-1), output_file{}, err(false), p_flag(false){}
-    my_proc(char* cname, int readfd, int writefd): cname(cname), next(nullptr), arg_count(1), arg_list{cname, NULL},
-    line_count(-1), readfd(readfd), writefd(writefd), completed(false), pid(-1), output_file{}, err(false), p_flag(false){}
+    line_count(-1), rfd(0), readfd(0), writefd(1), completed(false), pid(-1), output_file{}, err(false), p_flag(false){}
 
     virtual ~my_proc(){}
     my_proc* next;
@@ -43,6 +41,7 @@ public:
     int arg_count;
     char* arg_list[15];
     int line_count;
+    int rfd;
     int readfd;
     int writefd;
     bool completed;  // whether main process takes back child pid or not
@@ -73,6 +72,7 @@ public:
     deque<my_proc*> proc;
     int proc_indx = 0;
     int pipe_counter = 0;
+    map<unsigned int, int> user_pipe;
 };
 map<unsigned int,user*> users;
 deque<char*> cmd;
@@ -97,8 +97,8 @@ void unicast_msg(string mode, int userid) {
     return;
 }
 
-void broadcast_msg(string mode, int userid) {
-    char* msg;
+void broadcast_msg(string mode, int userid, char* msg) {
+    
     string strmsg;
     if (mode == "login") {
         strmsg = "*** User \'" + users[userid]->username + "\' entered from " + users[userid]->addr + ":" + to_string(users[userid]->port) + ". ***\n";
@@ -108,10 +108,6 @@ void broadcast_msg(string mode, int userid) {
     else if (mode == "logout") {
         strmsg = "*** User \'" + users[userid]->username + "\' left. ***\n";
         msg = strmsg.data();
-    }
-    else if (mode == "receive") {
-        string command = cmd_copy;
-        strmsg = "*** " + users[userid]->username + " (#" + userid + ") just received from " +
     }
 
     for (int i = 1; i < 32; i++) {
@@ -215,12 +211,12 @@ void do_fork(int userid, my_proc* p) {
         readfd = p->prev.front()->readfd;
     }
     else {
-        readfd = p->readfd;
+        readfd = p->rfd;  //rfd is real readfd, origin readfd is used for storing pipe reading port
     }
     writefd = p->writefd;
-    //cout << p->cname << readfd << writefd << endl;
+    cout << p->cname << readfd << writefd << endl;
     if (flag) { // merge pipe
-        usleep(10000);
+        usleep(1000);
     }
     p->pid = fork();
     if (p->pid == -1) {
@@ -258,6 +254,9 @@ void do_fork(int userid, my_proc* p) {
             close(fd);
         }
         exit(0);
+    }
+    else {
+        close(readfd);
     }
     return;
 }
@@ -324,22 +323,30 @@ void exec_cmd(int userid) {
                 while (nxt) {     //if it has next
                     //my_proc* p1 = p;
                     if (nxt->line_count > 0 ) { //it means next's next is not ready
-			break;
+			            break;
                     }
 
                     if (nxt->next == nullptr || p->line_count < -100) { //reach pipeline end
-                        if (p->readfd != 0) {
-                            close(p->readfd);
+                        if (p->rfd != 0) {
+                            close(p->rfd);
+                            for (int a = 0; a < used_pipe.size(); a++) {
+                                if (used_pipe[a] == p->rfd)
+                                    used_pipe.erase(used_pipe.begin()+a);
+                            }
                         }
                         if (p->writefd != 1) {
                             close(p->writefd);
+                            for (int a = 0; a < used_pipe.size(); a++) {
+                                if (used_pipe[a] == p->writefd)
+                                    used_pipe.erase(used_pipe.begin()+a);
+                            }
                         }
-                        for (int a = 0; a < used_pipe.size(); a++) {
+                        /*for (int a = 0; a < used_pipe.size(); a++) {
                             if (used_pipe[a] == p->readfd || used_pipe[a] == p->writefd) {
                                 used_pipe.erase(used_pipe.begin()+a);
                                 a--;
                             }
-                        }
+                        }*/
                         if (waitpid(p->pid, &wstatus, 0) == -1) {
                             cerr << "failed to wait for child" << endl;
                         }
@@ -354,7 +361,7 @@ void exec_cmd(int userid) {
         }
     }
     if (s_flag)
-	    usleep(20000);
+	    usleep(20);
     return;
 }
 
@@ -390,21 +397,63 @@ void read_cmd(int userid) {
                 }
                 else if (next_cmd[0] == '<') {  //user read pipe
                     next_cmd[0] = ' ';
-                    int uid = atoi(next_cmd);
-                    if (users.find(uid) == users.end()) {
-                        cout <<  "*** Error: user #" << uid << " does not exist yet. ***" << endl;
+                    int u1_id = atoi(next_cmd);
+                    if (users.find(u1_id) == users.end()) {
+                        cout <<  "*** Error: user #" << u1_id << " does not exist yet. ***" << endl;
+                        kill_prev(cur);
+                        cmd.clear();
                     }
-                    cur->readfd = users[uid]->sockfd;
-                    cmd.pop_front();
+                    if (users[userid]->user_pipe.find(u1_id) == users[userid]->user_pipe.end()) {
+                        cout << "*** Error: the pipe #" << u1_id << "->#" << userid << "does not exist yet. ***" << endl;
+                        kill_prev(cur);
+                        cmd.clear();
+                    }
+                    else {
+                        cur->rfd = users[userid]->user_pipe.find(u1_id)->second;
+                        string command = cmd_copy;
+                        string strmsg = "*** " + users[userid]->username + " (#" + to_string(userid) + ") just received from "
+                                         + users[u1_id]->username + " (#" + to_string(u1_id) + ") by \'" + command + "\' ***\n";
+                        broadcast_msg("n", userid, strmsg.data());
+                        cmd.pop_front();
+                    }
+                    //cur->readfd = users[uid]->sockfd;
+                    
                 }
                 else if (next_cmd[0] == '>') {  //user write pipe
                     next_cmd[0] = ' ';
-                    int uid = atoi(next_cmd);
-                    if (users.find(uid) == users.end()) {
-                        cout <<  "*** Error: user #" << uid << " does not exist yet. ***" << endl;
+                    int u1_id = atoi(next_cmd);
+
+                    if (users.find(u1_id) == users.end()) {
+                        cout <<  "*** Error: user #" << u1_id << " does not exist yet. ***" << endl;
+                        kill_prev(cur);
+                        cmd.clear();
                     }
-                    cur->writefd = users[uid]->sockfd;
-                    cmd.pop_front();
+                    // always the write cmd to create pipe
+                    if (users[userid]->user_pipe.find(u1_id) != users[userid]->user_pipe.end()) {
+                        cout << "*** Error: the pipe #" << userid << "->#" << u1_id << "already exists. ***" << endl;
+                        kill_prev(cur);
+                        cmd.clear();
+                    }
+                    else {
+                        int pipefd[2];
+                        create_pipe(&pipefd[0]);
+                        cur->readfd = pipefd[0];
+                        cur->writefd = pipefd[1];
+                        used_pipe.push_back(pipefd[0]);
+                        used_pipe.push_back(pipefd[1]);
+                        // add to user pipe list for both users
+                        users[userid]->user_pipe.insert(pair<unsigned int, int>(u1_id, cur->writefd));
+                        users[u1_id]->user_pipe.insert(pair<unsigned int, int>(userid, cur->readfd));
+                        //cur->writefd = users[uid]->sockfd;
+
+                        // broadcast pipe message
+                        string command = cmd_copy;
+                        string strmsg = "*** " + users[userid]->username + " (#" + to_string(userid) + ") just piped \'" + command
+                                         + "\' to " + users[u1_id]->username + " (#" + to_string(u1_id) + " ***\n";
+                        broadcast_msg("n", userid, strmsg.data());
+                        cmd.pop_front();
+                    }
+                    
                 }
                 else {   // command arguments
                     if (cur->arg_count >= MAX_ARGUMENTS-1) {   // last one is NULL
@@ -497,7 +546,7 @@ void Input(int userid) {
                 FD_CLR(usr->sockfd, &afds);
 
                 user_list[userid] = false;
-                broadcast_msg("logout", userid);
+                broadcast_msg("logout", userid, nullptr);
                 users.erase(users.find(userid));
 
                 return;
@@ -628,7 +677,7 @@ int main(int argc, char** argv, char** envp) {
                 user* new_usr = new user(new_usrid, inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port), ssock);
                 users.insert(pair<unsigned int, user*>(new_usrid, new_usr));
                 unicast_msg("welcome", new_usrid);  // unicast welcome message
-                broadcast_msg("login", new_usrid);  // broadcast login message
+                broadcast_msg("login", new_usrid, nullptr);  // broadcast login message
                 unicast_msg("start", new_usrid);
             }
         }
