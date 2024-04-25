@@ -27,7 +27,7 @@ int nfds;
 fd_set rfds;  // read file descriptor set
 fd_set afds;  // active file descriptor set
 int in_fd, out_fd, err_fd;
-bool user_list[32];
+bool user_list[33];
 
 class my_proc {
 public:
@@ -589,8 +589,9 @@ void read_cmd(int userid) {
         do_fork(userid, cur);
 
         line_counter(userid);
+        exec_cmd(userid);
     }
-    exec_cmd(userid);
+
 
     return;
 }
@@ -745,7 +746,7 @@ int main(int argc, char** argv, char** envp) {
 
     signal(SIGCHLD, sig_waitchild);
     // initialization
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 33; i++) {
         // user status
         user_list[i] = false;
     }
@@ -799,7 +800,7 @@ int main(int argc, char** argv, char** envp) {
             FD_SET(ssock, &afds);
             // create a new user
             int new_usrid = -1;
-            for (int i = 1; i < 32; i++) {
+            for (int i = 1; i < 33; i++) {
                 if (user_list[i] == false) {
                     new_usrid = i;
                     break;
@@ -816,7 +817,7 @@ int main(int argc, char** argv, char** envp) {
                 unicast_msg("start", new_usrid, nullptr);
             }
         }
-        for (int i = 1; i < 32; i++) {
+        for (int i = 1; i < 33; i++) {
             if (user_list[i] == false)
                 continue;
             int fd = users[i]->sockfd;

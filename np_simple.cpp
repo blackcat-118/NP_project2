@@ -25,15 +25,15 @@ deque<char*> cmd;
 class my_proc {
 public:
     my_proc(char* cname): cname(cname), next(nullptr), arg_count(1), arg_list{cname, NULL},
-    line_count(-1), readfd(0), writefd(1), completed(false), pid(-1), output_file{}, err(false), p_flag(false) {}
+    line_count(-1), pipefd{1, 2}, readfd(0), writefd(1), completed(false), pid(-1), output_file{}, err(false), p_flag(false) {}
     my_proc* next;
     deque<my_proc*> prev;
     char* cname;
     int arg_count;
     char* arg_list[15];
     int line_count;
-    int readfd;
-    int writefd;
+    int readfd, writefd;
+    int pipefd[2];
     bool completed;  // whether main process takes back child pid or not
     int pid;  // if pid doesn't execute successfully(such as killed by someone), it will be -1
     char output_file[100];
@@ -42,7 +42,6 @@ public:
 
 };
 deque<my_proc*> proc;
-int proc_indx = 0;
 int pipe_counter = 0;
 void create_pipe(int* pipefd) {
 
@@ -76,7 +75,6 @@ void wrerr_pipe(int writefd) {
 void close_pipes(vector<int> fd) {
 
     for (int i = 0; i < fd.size(); i++) {
-        //cout << "close: " << fd[i] << endl;
         close(fd[i]);
     }
 
@@ -98,22 +96,21 @@ void kill_prev(my_proc* p) {
 vector<int> used_pipe;
 
 void do_fork(my_proc* p) {
-    int pipefd[2];
     if (p->pid != -1) {
         return;
     }
     //cout << p->line_count << endl;
-    bool flag = false;
+    bool flag = false;  // whether it should create a pipe
     if (p->line_count > 0) {
 
-        for (int i = 0; i < proc_indx; i++) {
+        for (int i = proc.size()-2; i >= 0; i--) {
             my_proc* p1 = proc[i];
 
             if (p1->line_count == p->line_count) {
                 //pipe to the same line later
                 //let they use one pipe
-                p->readfd = p1->readfd;
-                p->writefd = p1->writefd;
+                p->pipefd[0] = p1->pipefd[0];
+                p->pipefd[1] = p1->pipefd[1];
                 flag = true;
                 break;
             }
@@ -122,21 +119,23 @@ void do_fork(my_proc* p) {
             flag = false;
         if (flag == false) {
             //cout << "create pipe" << endl;
-            create_pipe(&pipefd[0]);
-            p->readfd = pipefd[0];
-            p->writefd = pipefd[1];
-            used_pipe.push_back(pipefd[0]);
-            used_pipe.push_back(pipefd[1]);
+            create_pipe(&p->pipefd[0]);
+            used_pipe.push_back(p->pipefd[0]);
+            used_pipe.push_back(p->pipefd[1]);
         }
     }
     int readfd, writefd;
-    if (!p->prev.empty()) {
-        readfd = p->prev.front()->readfd;
+    int pre_writefd = 1;
+    if (!p->prev.empty()) {  // there is a pipe before this command
+        readfd = p->prev.front()->pipefd[0];
+        pre_writefd = p->prev.front()->writefd;
     }
     else {
         readfd = p->readfd;
     }
-    writefd = p->writefd;
+    writefd = p->pipefd[1];
+    p->readfd = readfd;
+    p->writefd = writefd;
     //cout << p->cname << readfd << writefd << endl;
     if (flag) { // merge pipe
         usleep(10000);
@@ -173,10 +172,29 @@ void do_fork(my_proc* p) {
             }
             exit(1);
         }
-        if (fd != 0) {
-            close(fd);
-        }
+
         exit(0);
+    }
+    else {
+        //parent process
+        if (readfd != 0) {
+
+            for (int a = 0; a < used_pipe.size(); a++) {
+                if (used_pipe[a] == readfd) {
+                    used_pipe.erase(used_pipe.begin()+a);
+                    close(readfd);
+                }
+            }
+        }
+        if (pre_writefd != 1) {
+
+            for (int a = 0; a < used_pipe.size(); a++) {
+                if (used_pipe[a] == pre_writefd) {
+                    used_pipe.erase(used_pipe.begin()+a);
+                    close(pre_writefd);
+                }
+            }
+        }
     }
     return;
 }
@@ -205,20 +223,9 @@ void check_proc_pipe(my_proc* cur) {
     }
     return;
 }
-void exec_cmd() {
+void wait_childpid() {
     int wstatus;
-    bool s_flag = false;
-    for (proc_indx; proc_indx < proc.size(); proc_indx++) {
-        my_proc* p = proc[proc_indx];
-        //cout << i << " ";
-        if (p->completed == true || p->pid != -1)
-            continue;
 
-        do_fork(p);
-	if (p->line_count > 0)
-	    s_flag = true;
-
-    }
     // this block is used for waitpid
     for (int i = 0; i < proc.size(); i++) {
          my_proc* p = proc[i];
@@ -240,22 +247,11 @@ void exec_cmd() {
                 while (nxt) {     //if it has next
                     //my_proc* p1 = p;
                     if (nxt->line_count > 0 ) { //it means next's next is not ready
-			break;
+                        break;
                     }
 
                     if (nxt->next == nullptr || p->line_count < -100) { //reach pipeline end
-                        if (p->readfd != 0) {
-                            close(p->readfd);
-                        }
-                        if (p->writefd != 1) {
-                            close(p->writefd);
-                        }
-                        for (int a = 0; a < used_pipe.size(); a++) {
-                            if (used_pipe[a] == p->readfd || used_pipe[a] == p->writefd) {
-                                used_pipe.erase(used_pipe.begin()+a);
-                                a--;
-                            }
-                        }
+
                         if (waitpid(p->pid, &wstatus, 0) == -1) {
                             cerr << "failed to wait for child" << endl;
                         }
@@ -269,8 +265,7 @@ void exec_cmd() {
             }
         }
     }
-    if (s_flag)
-	    usleep(20000);
+
     return;
 }
 
@@ -305,6 +300,7 @@ void read_cmd() {
                     strcpy(cur->output_file, next_cmd);
                     cmd.pop_front();
                 }
+
                 else {   // command arguments
                     if (cur->arg_count >= MAX_ARGUMENTS-1) {   // last one is NULL
                         cerr << "reach argument number limit for command:" << cur_cmd << endl;
@@ -323,12 +319,14 @@ void read_cmd() {
                 }
                 next_cmd = cmd.front();
             }
+
             if (strcmp(next_cmd, "|") == 0) { //pipe to next
                 cur->line_count = 1;
                 cur->p_flag = true;
                 pipe_counter++;
                 cmd.pop_front();
             }
+
             else if (strcmp(next_cmd, "!") == 0) {
                 cur->err = true;
                 cur->line_count = 1;
@@ -336,6 +334,7 @@ void read_cmd() {
                 pipe_counter++;
                 cmd.pop_front();
             }
+
             else if (next_cmd[0] == '|') {  //number pipe
                 next_cmd[0] = ' ';
                 cur->line_count = atoi(next_cmd);
@@ -346,6 +345,7 @@ void read_cmd() {
                 flag = true;
                 cmd.pop_front();
             }
+
             else if (next_cmd[0] == '!') {  //number pipe
                 next_cmd[0] = ' ';
                 cur->err = true;
@@ -359,9 +359,11 @@ void read_cmd() {
             }
         }
         check_proc_pipe(cur);
-        exec_cmd();
+        do_fork(cur);
         line_counter();
+        wait_childpid();
     }
+
     return;
 }
 
