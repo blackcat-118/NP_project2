@@ -32,7 +32,7 @@ bool user_list[33];
 class my_proc {
 public:
     my_proc(char* cname): cname(cname), next(nullptr), arg_count(1), arg_list{cname, NULL},
-    line_count(-1), rfd(0), readfd(0), writefd(1), pid(-1), output_file{}, input_file{}{}
+    line_count(-1), pipefd{1, 2}, readfd(0), writefd(1), pid(-1), output_file{}, input_file{}{}
 
     virtual ~my_proc(){}
     my_proc* next;
@@ -41,9 +41,8 @@ public:
     int arg_count;
     char* arg_list[15];
     int line_count;
-    int rfd;
-    int readfd;
-    int writefd;
+    int readfd, writefd;
+    int pipefd[2];
     int pid;  // if pid doesn't execute successfully(such as killed by someone), it will be -1
     char output_file[100];
     char input_file[20];
@@ -196,8 +195,7 @@ void do_fork(int userid, my_proc* p) {
         return;
     }
     //cout << p->line_count << endl;
-    bool flag = false;
-    int merge_pid = -1;
+    bool flag = false;  // whether it should create a pipe
     if (p->line_count > 0) {
 
         for (int i = users[userid]->proc.size()-2; i >= 0; i--) {
@@ -206,11 +204,9 @@ void do_fork(int userid, my_proc* p) {
             if (p1->line_count == p->line_count) {
                 //pipe to the same line later
                 //let they use one pipe
-                p->readfd = p1->readfd;
-                p->writefd = p1->writefd;
-
-                flag = true; // merge pipe, this process do not need to create a pipe
-                merge_pid = p1->pid;
+                p->pipefd[0] = p1->pipefd[0];
+                p->pipefd[1] = p1->pipefd[1];
+                flag = true;
                 break;
             }
         }
@@ -218,31 +214,25 @@ void do_fork(int userid, my_proc* p) {
             flag = false;
         if (flag == false) {
             //cout << "create pipe" << endl;
-            create_pipe(&pipefd[0]);
-            p->readfd = pipefd[0];
-            p->writefd = pipefd[1];
-            used_pipe.push_back(pipefd[0]);
-            used_pipe.push_back(pipefd[1]);
+            create_pipe(&p->pipefd[0]);
+            used_pipe.push_back(p->pipefd[0]);
+            used_pipe.push_back(p->pipefd[1]);
         }
     }
     int readfd, writefd;
-    int rfd, wfd = 1;
+    int wfd = 1;
     if (!p->prev.empty()) {
-        readfd = p->prev.front()->readfd;
+        readfd = p->prev.front()->pipefd[0];
         wfd = p->prev.front()->writefd;
     }
     else {
-        readfd = p->rfd;  //rfd is real readfd, origin readfd is used for storing pipe reading port
+        readfd = p->readfd;  //rfd is real readfd, origin readfd is used for storing pipe reading port
     }
-    writefd = p->writefd;
+    writefd = p->pipefd[1];
+    p->readfd = readfd;
+    p->writefd = writefd;
     //cout << p->cname << readfd << writefd << endl;
 
-
-    /*if (flag) { // merge pipe
-        usleep(10000);
-        int wstatus;
-        waitpid(merge_pid,&wstatus, 0);
-    }*/
     p->pid = fork();
     //cout << p->cname << " " << p->pid << endl;
     if (p->pid == -1) {
@@ -271,9 +261,6 @@ void do_fork(int userid, my_proc* p) {
         }
         //cout << p->cname << endl;
         close_pipes(used_pipe);  //also close the pipe in different pipeline
-        if (merge_pid != -1) {
-            usleep(50000);
-        }
 
         if (execvp(p->cname, p->arg_list) == -1) {
             cerr << "Unknown command: [" << p->cname << "]." << endl;
@@ -349,22 +336,11 @@ void check_proc_pipe(int userid, my_proc* cur) {
     }
     return;
 }
-void exec_cmd(int userid) {
+void wait_childpid(int userid) {
     int wstatus;
     bool s_flag = false;
     deque<my_proc*>& proc = users[userid]->proc;
 
-    /*for (users[userid]->proc_indx; users[userid]->proc_indx < proc.size(); users[userid]->proc_indx++) {
-        my_proc* p = proc[users[userid]->proc_indx];
-        //cout << i << " ";
-        if (p->pid != -1)
-            continue;
-
-        do_fork(userid, p);
-	if (p->line_count > 0)
-	    s_flag = true;
-
-    }*/
     // this block is used for waitpid
     for (int i = 0; i < proc.size(); i++) {
         my_proc* p = proc[i];
@@ -385,24 +361,6 @@ void exec_cmd(int userid) {
                     }
 
                     if (nxt->next == nullptr || p->line_count < -100) { //reach pipeline end
-                        /*if (p->rfd != 0) {
-
-                            for (int a = 0; a < used_pipe.size(); a++) {
-                                if (used_pipe[a] == p->rfd) {
-                                    used_pipe.erase(used_pipe.begin()+a);
-                                    close(p->rfd);
-                                }
-                            }
-                        }
-                        if (p->writefd != 1) {
-
-                            for (int a = 0; a < used_pipe.size(); a++) {
-                                if (used_pipe[a] == p->writefd) {
-                                    used_pipe.erase(used_pipe.begin()+a);
-                                    close(p->writefd);
-                                }
-                            }
-                        }*/
                         waitpid(p->pid, &wstatus, 0); // here still should wait
                         p->completed = true;
                         break;
@@ -488,7 +446,7 @@ void read_cmd(int userid) {
                     int indx = -1;
                     for (int i = 0; i < user_pipe.size(); i++) {
                         if (userid == user_pipe[i]->recevier_id && sender_id == user_pipe[i]->sender_id) {
-                            cur->rfd = user_pipe[i]->readfd;
+                            cur->readfd = user_pipe[i]->readfd;
                             //cur->prev.push_back(user_pipe[i]->p);
                             //user_pipe[i]->p->next = cur;
                             user_pipe[i]->p->up_flag = false;
@@ -532,14 +490,13 @@ void read_cmd(int userid) {
                     else {
                         cur->up_flag = true;
                         // create user pipe
-                        int pipefd[2];
-                        create_pipe(&pipefd[0]);
-                        cur->readfd = pipefd[0];
-                        cur->writefd = pipefd[1];
-                        used_pipe.push_back(pipefd[0]);
-                        used_pipe.push_back(pipefd[1]);
+                        create_pipe(&cur->pipefd[0]);
+                        //cur->readfd = pipefd[0];
+                        cur->writefd = cur->pipefd[1];
+                        used_pipe.push_back(cur->pipefd[0]);
+                        used_pipe.push_back(cur->pipefd[1]);
                         // add to user pipe list
-                        mypipe* p1 = new mypipe(userid, receiver_id, pipefd[0], pipefd[1], cur);
+                        mypipe* p1 = new mypipe(userid, receiver_id, cur->pipefd[0], cur->pipefd[1], cur);
                         user_pipe.push_back(p1);
                         // broadcast pipe message
                         string command = cmd_copy;
@@ -587,12 +544,9 @@ void read_cmd(int userid) {
         }
         check_proc_pipe(userid, cur);
         do_fork(userid, cur);
-
         line_counter(userid);
-        exec_cmd(userid);
+        wait_childpid(userid);
     }
-
-
     return;
 }
 
