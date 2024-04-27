@@ -1,5 +1,6 @@
 using namespace std;
 #include <iostream>
+#include <stdio.h>
 #include <cerrno>
 #include <cstring>
 #include <string>
@@ -27,11 +28,15 @@ using namespace std;
 
 #define SHMKEY1 ((key_t) 7890) /* base value for shmem key */
 #define SHMKEY2 ((key_t) 7891) /* base value for shmem key */
+#define SHMKEY3 ((key_t) 7892) /* base value for shmem key */
+#define SHMKEY4 ((key_t) 7893) /* base value for shmem key */
 //#define SEMKEY1 ((key_t) 7892) /* client semaphore key */
 //#define SEMKEY2 ((key_t) 7893) /* server semaphore key */
 #define PERMS 0666
 
-int shm_ul, shm_usr, clisem, servsem; /* shared memory and semaphore IDs */
+#define FIFO_PATH "user_pipe/fifo"
+
+int shm_ul, shm_usr, shm_up, shm_msg, clisem, servsem; /* shared memory and semaphore IDs */
 deque<char*> cmd;
 char cmd_copy[20000];
 class my_proc {
@@ -62,6 +67,7 @@ public:
 class user {
 public:
     unsigned int id;
+    unsigned int pid;
     char username[100];
     char addr[32];
     unsigned short port;
@@ -70,16 +76,14 @@ public:
 
 class mypipe {
 public:
-    mypipe(unsigned int id1, unsigned int id2, int readfd, int writefd, my_proc* p): sender_id(id1), recevier_id(id2), readfd(readfd), writefd(writefd), p(p){}
     unsigned int sender_id;
     unsigned int recevier_id;
-    int readfd;
-    int writefd;
-    my_proc* p;
+    char pipepath[100];
+    int status = 0;  // 0->unused; 1->write-ing; 2->read-ing
 };
 user *users;    //shared
-//map<unsigned int, user*> users;  //shared
-vector<mypipe*>user_pipe;        //shared
+char* bc_msg;  //shared
+mypipe *user_pipe;   //shared
 bool *user_list; //shared
 
 vector<int> used_pipe;
@@ -100,8 +104,35 @@ void sig_exit(int signo) {
         if (shmctl(shm_usr, IPC_RMID, (struct shmid_ds *) 0) < 0) {
             cerr << "remove shared memory2 error: " << strerror(errno) << endl;
         }
+        if (shmdt(user_pipe) < 0) {
+            cerr << "unattach shared memory3 error: " << strerror(errno) << endl;
+        }
+        if (shmctl(shm_up, IPC_RMID, (struct shmid_ds *) 0) < 0) {
+            cerr << "remove shared memory3 error: " << strerror(errno) << endl;
+        }
+        if (shmdt(bc_msg) < 0) {
+            cerr << "unattach shared memory4 error: " << strerror(errno) << endl;
+        }
+        if (shmctl(shm_msg, IPC_RMID, (struct shmid_ds *) 0) < 0) {
+            cerr << "remove shared memory4 error: " << strerror(errno) << endl;
+        }
         exit(0);
 
+    }
+    return;
+}
+
+void sig_waitchild(int signo) {
+    if (signo == SIGCHLD) {
+        int status;
+        while(waitpid(-1,&status,WNOHANG) > 0){}
+    }
+    return;
+}
+
+void sig_broadcast(int signo) {
+    if (signo == SIGUSR1) {
+        cout << bc_msg;
     }
     return;
 }
@@ -117,7 +148,7 @@ void unicast_msg(string mode, int userid, char* msg) {
         strmsg = "% ";
         msg = strmsg.data();
     }
-    write(users[userid].sockfd, msg, strlen(msg));
+    cout << msg;
 
     return;
 }
@@ -138,12 +169,12 @@ void broadcast_msg(string mode, int userid, char* msg) {
         strmsg = "*** " + string(users[userid].username) + " yelled ***: " + msg + "\n";
         msg = strmsg.data();
     }
-
+    strcpy(bc_msg, msg);
     for (int i = 1; i <= MAX_USER; i++) {
         if (user_list[i] == true) {
-            write(users[i].sockfd, msg, strlen(msg));
+            kill(users[i].pid, SIGUSR1);
+            //write(users[i].sockfd, msg, strlen(msg));
         }
-
     }
     return;
 }
@@ -232,7 +263,7 @@ void do_fork(int userid, my_proc* p) {
             used_pipe.push_back(p->pipefd[1]);
         }
     }
-    int readfd, writefd;
+    int readfd = 0, writefd = 1;
     int wfd = 1;
     if (!p->prev.empty()) {
         readfd = p->prev.front()->pipefd[0];
@@ -308,7 +339,7 @@ void do_fork(int userid, my_proc* p) {
                 }
             }
         }
-        if (p->up_flag == true) {
+        /*if (p->up_flag == true) {
             if (writefd != 1) {
 
                 for (int a = 0; a < used_pipe.size(); a++) {
@@ -318,7 +349,7 @@ void do_fork(int userid, my_proc* p) {
                     }
                 }
             }
-        }
+        }*/
 
     }
     return;
@@ -357,7 +388,7 @@ void wait_childpid(int userid) {
     // this block is used for waitpid
     for (int i = 0; i < proc.size(); i++) {
         my_proc* p = proc[i];
-        if (p->completed == true || p->up_flag == true)  // if this cmd pipe to another user, it should wait later
+        if (p->completed == true )  //|| p->up_flag == true if this cmd pipe to another user, it should wait later
             continue;
         if (p->line_count <= 0) {  //it means p's next is ready
 
@@ -405,7 +436,7 @@ void read_cmd(int userid) {
         my_proc* cur = new my_proc(cur_cmd);
         proc.push_back(cur);
         int sender_id = -1, receiver_id = -1;
-
+        int read_indx = -1, write_indx = -1;
         if (cmd.size() != 0) {  //this block is used for reading pipes or arguments
             next_cmd = cmd.front();
              while (next_cmd[0] != '|' && next_cmd[0] != '!') {  //check whether next is the current command's argument or file redirection
@@ -422,12 +453,16 @@ void read_cmd(int userid) {
                 else if (next_cmd[0] == '<') {  //user read pipe
                     next_cmd[0] = ' ';
                     sender_id = atoi(next_cmd);
+                    if (sender_id == userid)
+                        sender_id = -1;
                     cmd.pop_front();
 
                 }
                 else if (next_cmd[0] == '>') {  //user write pipe
                     next_cmd[0] = ' ';
                     receiver_id = atoi(next_cmd);
+                    if (receiver_id == userid)
+                        receiver_id = -1;
                     cmd.pop_front();
 
                 }
@@ -459,19 +494,19 @@ void read_cmd(int userid) {
                     strcpy(cur->input_file, "/dev/null");
                 }
                 else {
-                    int indx = -1;
-                    for (int i = 0; i < user_pipe.size(); i++) {
-                        if (userid == user_pipe[i]->recevier_id && sender_id == user_pipe[i]->sender_id) {
-                            cur->readfd = user_pipe[i]->readfd;
-                            //cur->prev.push_back(user_pipe[i]->p);
-                            //user_pipe[i]->p->next = cur;
-                            user_pipe[i]->p->up_flag = false;
-                            indx = i;
+                    for (int i = 0; i < MAX_USER*MAX_USER; i++) {
+                        if (user_pipe[i].status == 0) 
+                            continue;
+                        if (userid == user_pipe[i].recevier_id && sender_id == user_pipe[i].sender_id) {
+                            strcpy(cur->input_file, user_pipe[i].pipepath);
+                            //cur->readfd = user_pipe[i].readfd;
+                            //user_pipe[i].p->up_flag = false;
+                            read_indx = i;
                             break;
                         }
                     }
                     // print pipe status
-                    if (indx == -1) {
+                    if (read_indx == -1) {
                         cout << "*** Error: the pipe #" << sender_id << "->#" << userid << " does not exist yet. ***" << endl;
                         strcpy(cur->input_file, "/dev/null");
                     }
@@ -480,7 +515,8 @@ void read_cmd(int userid) {
                         string strmsg = "*** " + string(users[userid].username) + " (#" + to_string(userid) + ") just received from "
                                         + string(users[sender_id].username) + " (#" + to_string(sender_id) + ") by \'" + command + "\' ***\n";
                         broadcast_msg("n", userid, strmsg.data());
-                        user_pipe.erase(user_pipe.begin()+indx);
+                        //user_pipe[indx].used = false;
+                        //user_pipe.erase(user_pipe.begin()+indx);
                     }
                 }
             }
@@ -493,8 +529,10 @@ void read_cmd(int userid) {
                 // always the write cmd to create pipe
                 else {
                     int indx = -1;
-                    for (int i = 0; i < user_pipe.size(); i++) {
-                        if (userid == user_pipe[i]->sender_id && receiver_id == user_pipe[i]->recevier_id) {
+                    for (int i = 0; i < MAX_USER*MAX_USER; i++) {
+                        if (user_pipe[i].status == 0)
+                            continue;
+                        if (userid == user_pipe[i].sender_id && receiver_id == user_pipe[i].recevier_id) {
                             indx = i;
                             break;
                         }
@@ -507,14 +545,20 @@ void read_cmd(int userid) {
                     else {
                         cur->up_flag = true;
                         // create user pipe
-                        create_pipe(&cur->pipefd[0]);
-                        //cur->readfd = pipefd[0];
-                        cur->writefd = cur->pipefd[1];
-                        used_pipe.push_back(cur->pipefd[0]);
-                        used_pipe.push_back(cur->pipefd[1]);
-                        // add to user pipe list
-                        mypipe* p1 = new mypipe(userid, receiver_id, cur->pipefd[0], cur->pipefd[1], cur);
-                        user_pipe.push_back(p1);
+                        for (int i = 0; i < MAX_USER*MAX_USER; i++) {
+                            if (user_pipe[i].status == 0) {
+                                write_indx = i;
+                                break;
+                            }
+                        }
+                        user_pipe[write_indx].sender_id = userid;
+                        user_pipe[write_indx].recevier_id = receiver_id;
+                        user_pipe[write_indx].status = 1;
+                        sprintf(user_pipe[write_indx].pipepath, "%s%d_%d", FIFO_PATH, sender_id, receiver_id);
+                        if ( (mknod(user_pipe[write_indx].pipepath, S_IFIFO | PERMS, 0) < 0)) {
+                            cerr << "Error: create fifo" << errno << endl;
+                        }
+                        strcpy(cur->output_file, user_pipe[write_indx].pipepath);
                         // broadcast pipe message
                         string command = cmd_copy;
                         string strmsg = "*** " + string(users[userid].username) + " (#" + to_string(userid) + ") just piped \'" + command
@@ -523,7 +567,6 @@ void read_cmd(int userid) {
                     }
                 }
             }
-
 
             if (strcmp(next_cmd, "|") == 0) { //pipe to next
                 cur->line_count = 1;
@@ -557,12 +600,31 @@ void read_cmd(int userid) {
                 );
                 cmd.pop_front();
             }
-
+        }
+        
+        if (read_indx != -1) {
+            sleep(1);
+            if (user_pipe[read_indx].status != 2)
+                cout << "previous process can't complete writing immediately." << endl;
+        }
+        if (write_indx != -1) {
+            sleep(1);
+            if (user_pipe[write_indx].status != 0)
+                cout << "previous process can't complete reading immediately." << endl;
         }
         check_proc_pipe(userid, cur);
         do_fork(userid, cur);
         line_counter(userid);
         wait_childpid(userid);
+        if (read_indx != -1) {
+            user_pipe[read_indx].status = 0;
+            if (unlink(user_pipe[read_indx].pipepath) < 0)
+                cout << "client: can't unlink" << endl;
+        }
+        if (write_indx != -1) {
+            user_pipe[write_indx].status = 2;
+        }
+        
     }
     return;
 }
@@ -574,14 +636,9 @@ void Input(int userid) {
     //for (map<string, string>::iterator it = users[userid].env_var.begin(); it != users[userid].env_var.end(); it++) {
     //    setenv(it->first.data(), it->second.data(), 1);
     //}
-    for (int i = 0; i <= MAX_USER; i++) {
-        // user status
-        user_list[i] = false;
-    }
-
     while (1) {
         char lined_cmd[20000];
-
+        cout << "% ";
         // get one line command
         if (!cin.getline(lined_cmd, 20000)) {
            break;
@@ -603,12 +660,15 @@ void Input(int userid) {
                 close(usr->sockfd);
 
                 user_list[userid] = false;
-                for (int i = 0; i < user_pipe.size(); i++) {
-                    if (user_pipe[i]->sender_id == userid || user_pipe[i]->recevier_id == userid) {
-                        close(user_pipe[i]->readfd);
-                        close(user_pipe[i]->writefd);
-                        user_pipe.erase(user_pipe.begin()+i);
-                        i--;
+                for (int i = 0; i < MAX_USER*MAX_USER; i++) {
+                    if (user_pipe[i].status == 0)
+                        continue;
+                    if (user_pipe[i].sender_id == userid || user_pipe[i].recevier_id == userid) {
+                        //close(user_pipe[i].readfd);
+                        //close(user_pipe[i].writefd);
+                        user_pipe[i].status = 0;
+                        if (unlink(user_pipe[i].pipepath) < 0)
+                            cout << "client: can't unlink" << endl;
                     }
                 }
                 broadcast_msg("logout", userid, nullptr);
@@ -641,13 +701,7 @@ void Input(int userid) {
                     cerr << "error: need arguments for setenv" << endl;
                     break;
                 }
-                //cout << "setenv " << arg1 << " " << arg2 << endl;
-                /*if (users[userid].env_var.find(arg1) != users[userid].env_var.end()) {
-                    users[userid].env_var.find(arg1)->second = arg2;
-                }
-                else {
-                    users[userid].env_var.insert(pair<string, string>(arg1, arg2));
-                }*/
+
                 setenv(arg1, arg2, 1);
                 line_counter(userid);
 
@@ -656,9 +710,9 @@ void Input(int userid) {
                 cout << "<ID>\t<nickname>\t<IP:port>\t<indicate me>" << endl;
                 //for (map<unsigned int, user*>::iterator it = users.begin(); it != users.end(); it++) {
                 for (int i = 1; i <= MAX_USER; i++) {
-                    if (user_list[i] == false && i != 1)
+                    if (user_list[i] == false)
                         continue;
-                    cout << i << users[i].username << users[i].addr << ":" << users[i].port << "\t";
+                    cout << i << "\t" << users[i].username << "\t" << users[i].addr << ":" << users[i].port << "\t";
                     //cout << it->second->id << "\t" << it->second->username << "\t" << it->second->addr << ":" << it->second->port << "\t";
                     if (i == userid) {
                         cout << "<-me";
@@ -712,15 +766,15 @@ void Input(int userid) {
         }while (cur_cmd != NULL);
 
         read_cmd(userid);
-        cout << "% " << flush;
+        //cout << "% " << flush;
     }
-
     return;
 }
 
-
 int main(int argc, char** argv, char** envp) {
     signal(SIGINT, sig_exit);
+    signal(SIGCHLD, sig_waitchild);
+    signal(SIGUSR1, sig_broadcast);
     // create shared memory
     if ( (shm_ul = shmget(SHMKEY1, sizeof(bool)*33, PERMS|IPC_CREAT)) < 0) {
         cerr << "create shared memory1 error: " << strerror(errno) << endl;
@@ -738,10 +792,27 @@ int main(int argc, char** argv, char** envp) {
         cerr << "attach shared memory2 error: " << strerror(errno) << endl;
         return 1;
     }
+    if ( (shm_up = shmget(SHMKEY3, sizeof(mypipe)*33*33, PERMS|IPC_CREAT)) < 0) {
+        cerr << "create shared memory3 error: " << strerror(errno) << endl;
+        return 1;
+    }
+    if ( ( user_pipe = (mypipe *) shmat(shm_up, NULL, 0)) == (mypipe*)-1){
+        cerr << "attach shared memory3 error: " << strerror(errno) << endl;
+        return 1;
+    }
+    if ( (shm_msg = shmget(SHMKEY4, sizeof(char)*10000, PERMS|IPC_CREAT)) < 0) {
+        cerr << "create shared memory4 error: " << strerror(errno) << endl;
+        return 1;
+    }
+    if ( ( bc_msg = (char*) shmat(shm_msg, NULL, 0)) == (char*)-1){
+        cerr << "attach shared memory4 error: " << strerror(errno) << endl;
+        return 1;
+    }
     // initialization
     for (int i = 1; i < MAX_USER; i++) {
         // user status
         user_list[i] = false;
+        users[i].sockfd = -1;
     }
     int msock, ssock, childpid;
     struct sockaddr_in cli_addr, serv_addr;
@@ -785,21 +856,12 @@ int main(int argc, char** argv, char** envp) {
         }
         if (new_usrid > 0) {
             user_list[new_usrid] = true;
-            cout << user_list[new_usrid] << endl;
             cout << "Server: add user " << new_usrid << " from " << inet_ntoa(cli_addr.sin_addr) << endl;
             users[new_usrid].id = new_usrid;
             strcpy(users[new_usrid].username, "(no name)");
-            cout << sizeof(user) << " " << sizeof(users[0]) << endl;
             strcpy(users[new_usrid].addr, inet_ntoa(cli_addr.sin_addr));
             users[new_usrid].port = ntohs(cli_addr.sin_port);
             users[new_usrid].sockfd = ssock;
-            
-
-            //user* new_usr = new user(new_usrid, inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port), ssock);
-            //users.insert(pair<unsigned int, user*>(new_usrid, new_usr));
-            unicast_msg("welcome", new_usrid, nullptr);  // unicast welcome message
-            broadcast_msg("login", new_usrid, nullptr);  // broadcast login message
-            unicast_msg("start", new_usrid, nullptr);
         }
         else {
             cout << "Server: reach maximum of users" << endl;
@@ -821,31 +883,19 @@ int main(int argc, char** argv, char** envp) {
             dup(ssock);
 
             close(msock);
+            unicast_msg("welcome", new_usrid, nullptr);  // unicast welcome message
+            broadcast_msg("login", new_usrid, nullptr);  // broadcast login message
+            //unicast_msg("start", new_usrid, nullptr);
             Input(new_usrid);
             exit(0);
         }
         else {
             // parent process
+            users[new_usrid].pid = childpid;
             close(ssock);
         }
     }
-    if (shmdt(user_list) < 0) {
-        cerr << "unattach shared memory1 error: " << strerror(errno) << endl;
-        return 1;
-    }
-    if (shmctl(shm_ul, IPC_RMID, (struct shmid_ds *) 0) < 0) {
-        cerr << "remove shared memory1 error: " << strerror(errno) << endl;
-        return 1;
-    }
-    if (shmdt(users) < 0) {
-        cerr << "unattach shared memory2 error: " << strerror(errno) << endl;
-        return 1;
-    }
-    if (shmctl(shm_usr, IPC_RMID, (struct shmid_ds *) 0) < 0) {
-        cerr << "remove shared memory2 error: " << strerror(errno) << endl;
-        return 1;
-    }
-
+    
     return 0;
 }
 
