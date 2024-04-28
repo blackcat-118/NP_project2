@@ -25,7 +25,7 @@ deque<char*> cmd;
 class my_proc {
 public:
     my_proc(char* cname): cname(cname), next(nullptr), arg_count(1), arg_list{cname, NULL},
-    line_count(-1), pipefd{1, 2}, readfd(0), writefd(1), completed(false), pid(-1), output_file{}, err(false), p_flag(false) {}
+    line_count(-1), pipefd{0, 1}, readfd(0), writefd(1), completed(false), pid(-1), output_file{}, err(false), p_flag(false) {}
     my_proc* next;
     deque<my_proc*> prev;
     char* cname;
