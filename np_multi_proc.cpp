@@ -148,7 +148,8 @@ void unicast_msg(string mode, int userid, char* msg) {
         strmsg = "% ";
         msg = strmsg.data();
     }
-    cout << msg;
+    strcpy(bc_msg, msg);
+    kill(users[userid].pid, SIGUSR1);
 
     return;
 }
@@ -388,7 +389,7 @@ void wait_childpid(int userid) {
     // this block is used for waitpid
     for (int i = 0; i < proc.size(); i++) {
         my_proc* p = proc[i];
-        if (p->completed == true )  //|| p->up_flag == true if this cmd pipe to another user, it should wait later
+        if (p->completed == true || p->up_flag == true)  // if this cmd pipe to another user, it should wait later
             continue;
         if (p->line_count <= 0) {  //it means p's next is ready
 
@@ -554,9 +555,9 @@ void read_cmd(int userid) {
                         user_pipe[write_indx].sender_id = userid;
                         user_pipe[write_indx].recevier_id = receiver_id;
                         user_pipe[write_indx].status = 1;
-                        sprintf(user_pipe[write_indx].pipepath, "%s%d_%d", FIFO_PATH, sender_id, receiver_id);
-                        if ( (mknod(user_pipe[write_indx].pipepath, S_IFIFO | PERMS, 0) < 0)) {
-                            cerr << "Error: create fifo" << errno << endl;
+                        sprintf(user_pipe[write_indx].pipepath, "%s%d_%d", FIFO_PATH, userid, receiver_id);
+                        if ( (mknod(user_pipe[write_indx].pipepath, S_IFIFO | PERMS, 0) < 0) && (errno != EEXIST)) {
+                            cerr << "Error: create fifo" << strerror(errno) << endl;
                         }
                         strcpy(cur->output_file, user_pipe[write_indx].pipepath);
                         // broadcast pipe message
@@ -602,7 +603,7 @@ void read_cmd(int userid) {
             }
         }
         
-        if (read_indx != -1) {
+        /*if (read_indx != -1) {
             sleep(1);
             if (user_pipe[read_indx].status != 2)
                 cout << "previous process can't complete writing immediately." << endl;
@@ -611,7 +612,7 @@ void read_cmd(int userid) {
             sleep(1);
             if (user_pipe[write_indx].status != 0)
                 cout << "previous process can't complete reading immediately." << endl;
-        }
+        }*/
         check_proc_pipe(userid, cur);
         do_fork(userid, cur);
         line_counter(userid);
