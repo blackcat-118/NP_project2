@@ -833,7 +833,7 @@ int main(int argc, char** argv, char** envp) {
     bzero((char*) &serv_addr, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    serv_addr.sin_port = htons(7000);
+    serv_addr.sin_port = htons(7002);
     if (bind(msock, (struct sockaddr*) &serv_addr, sizeof(serv_addr)) < 0) {
         cerr << "Server can't bind local address: " << strerror(errno) << endl;
         return 1;

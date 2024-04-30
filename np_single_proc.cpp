@@ -32,7 +32,7 @@ bool user_list[33];
 class my_proc {
 public:
     my_proc(char* cname): cname(cname), next(nullptr), arg_count(1), arg_list{cname, NULL},
-    line_count(-1), pipefd{1, 2}, readfd(0), writefd(1), pid(-1), output_file{}, input_file{}{}
+    line_count(-1), pipefd{0, 1}, readfd(0), writefd(1), pid(-1), output_file{}, input_file{}{}
 
     virtual ~my_proc(){}
     my_proc* next;
@@ -722,7 +722,7 @@ int main(int argc, char** argv, char** envp) {
     bzero((char*) &serv_addr, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    serv_addr.sin_port = htons(7000);
+    serv_addr.sin_port = htons(7001);
     if (bind(msock, (struct sockaddr*) &serv_addr, sizeof(serv_addr)) < 0) {
         cerr << "Server can't bind local address: " << strerror(errno) << endl;
         return 1;
